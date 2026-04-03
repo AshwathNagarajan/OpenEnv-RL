@@ -1,0 +1,8 @@
+name: email-openenv
+version: 2.0
+entry_point: env.environment:EmailEnv
+
+tasks:
+  - easy
+  - medium
+  - hard
