@@ -98,7 +98,6 @@ celerybeat.pid
 # Environments
 .env
 .venv
-env/
 venv/
 ENV/
 env.bak/
@@ -136,4 +135,3 @@ Thumbs.db
 # Local data - large files
 data/
 eron_mail/
-env/
