@@ -1,8 +1,63 @@
 name: email-openenv
-version: 2.0
+version: "2.0"
+description: "Email triage environment for AI agent training and evaluation"
+author: "OpenEnv Community"
+license: "MIT"
+
 entry_point: env.environment:EmailEnv
 
+action_space:
+  type: "object"
+  required: ["action_type"]
+  properties:
+    action_type:
+      type: "string"
+      enum: ["reply", "escalate", "spam", "archive"]
+      description: "Email action classification"
+    content:
+      type: "string"
+      description: "Optional response content for reply action"
+
+observation_space:
+  type: "object"
+  required: ["current_email", "remaining"]
+  properties:
+    current_email:
+      type: "object"
+      nullable: true
+      description: "Current email to process"
+    remaining:
+      type: "integer"
+      description: "Number of emails remaining in episode"
+
+reward:
+  min: -1.0
+  max: 1.0
+  description: "Reward signal for action quality"
+
+episode:
+  max_steps: 20
+  termination: "When all emails processed or max_steps reached"
+
 tasks:
-  - easy
-  - medium
-  - hard
+  - name: "easy"
+    description: "Email classification task - classify emails into actions"
+    difficulty: "easy"
+    success_threshold: 0.6
+    
+  - name: "medium"
+    description: "Classification + response generation - classify and compose replies"
+    difficulty: "medium"
+    success_threshold: 0.5
+    
+  - name: "hard"
+    description: "Full workflow - classify, prioritize, handle escalations, generate responses"
+    difficulty: "hard"
+    success_threshold: 0.4
+
+metadata:
+  domain: "Email Operations"
+  real_world_utility: true
+  dataset: "Enron Email Dataset (preprocessed)"
+  baseline_model: "gpt-4-turbo-preview"
+  estimated_runtime: "15 minutes per task"
