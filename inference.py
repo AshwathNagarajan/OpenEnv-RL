@@ -1,256 +1,204 @@
-#!/usr/bin/env python3
-"""
-Email Operations Environment - Baseline Inference Script
-
-Demonstrates running an AI agent against the email triage environment.
-Uses OpenAI Client to get model responses and logs structured output.
-
-Required environment variables:
-  - API_BASE_URL (e.g., https://api.openai.com/v1)
-  - MODEL_NAME (e.g., gpt-4-turbo-preview)
-  - OPENAI_API_KEY or HF_TOKEN
-"""
-
 import json
 import os
-import sys
-from datetime import datetime
-from typing import List
+from typing import Optional
 
+from dotenv import load_dotenv
 from openai import OpenAI
 
-from env.environment import EmailEnv
-from env.tasks import EasyTask, MediumTask, HardTask
+from app.env import EmailTriageEnv
+from app.models import EmailTriageAction
 
-# ============================================================================
-# Configuration
-# ============================================================================
+load_dotenv()
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4-turbo-preview")
-API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("HF_TOKEN", "")
+API_KEY = os.getenv("HF_TOKEN")
+API_BASE_URL = os.getenv("API_BASE_URL")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+TASK_NAME = os.getenv("EMAIL_TRIAGE_TASK", "hard")
+BENCHMARK = "email_triage_openenv"
+CSV_PATH = os.getenv("DATA_PATH", "data/email_triage_synthetic_5000.csv")
 
-TEMPERATURE = 0.7
-MAX_TOKENS = 512
-MAX_STEPS = 20
-MAX_TOTAL_REWARD = 20.0  # Per task
-SUCCESS_SCORE_THRESHOLD = 0.5
+if not API_KEY:
+    raise ValueError("Missing HF_TOKEN in environment or .env file")
 
-SYSTEM_PROMPT = """You are an email triage assistant. Your job is to classify and respond to emails.
+if not API_BASE_URL:
+    raise ValueError("Missing API_BASE_URL in environment or .env file")
 
-For each email, decide one of:
-- reply: Send a helpful response
-- escalate: Forward to a human specialist
-- spam: Mark as spam
-- archive: File away as handled
+client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
 
-Format your response as JSON:
-{"action_type": "reply", "content": "Your response..."}
-or
-{"action_type": "escalate"}
-"""
-
-# ============================================================================
-# Logging
-# ============================================================================
 
 def log_start(task: str, env: str, model: str) -> None:
-    """Log the start of an evaluation run."""
-    timestamp = datetime.utcnow().isoformat() + "Z"
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
     print(
-        json.dumps({
-            "type": "START",
-            "timestamp": timestamp,
-            "task": task,
-            "environment": env,
-            "model": model,
-        }),
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_val}",
         flush=True,
     )
 
 
-def log_step(step: int, action: str, reward: float, done: bool, error: str = None) -> None:
-    """Log a single environment step."""
-    log_entry = {
-        "type": "STEP",
-        "step": step,
-        "action": action,
-        "reward": round(reward, 3),
-        "done": done,
-    }
-    if error:
-        log_entry["error"] = error
-    print(json.dumps(log_entry), flush=True)
+def log_end(success: bool, steps: int, rewards: list[float]) -> None:
+    joined = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"[END] success={str(success).lower()} steps={steps} rewards={joined}", flush=True)
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    """Log the end of an evaluation run."""
-    timestamp = datetime.utcnow().isoformat() + "Z"
-    print(
-        json.dumps({
-            "type": "END",
-            "timestamp": timestamp,
-            "success": success,
-            "steps_taken": steps,
-            "final_score": round(score, 3),
-            "total_reward": round(sum(rewards), 3),
-            "reward_count": len(rewards),
-        }),
-        flush=True,
-    )
+ALLOWED_VALUES = {
+    "set_category": [
+        "technical",
+        "feature_request",
+        "internal",
+        "spam",
+        "shipping",
+        "security",
+        "sales",
+        "billing",
+    ],
+    "set_priority": [
+        "low",
+        "medium",
+        "high",
+        "critical",
+    ],
+    "set_route": [
+        "tech_support",
+        "product_team",
+        "manager",
+        "ignore",
+        "ops_team",
+        "security_team",
+        "sales_team",
+        "billing_team",
+    ],
+    "set_disposition": [
+        "respond",
+        "archive",
+        "escalate",
+        "mark_spam",
+        "request_more_info",
+        "resolve",
+    ],
+    "set_escalation": [True, False],
+}
 
 
-# ============================================================================
-# Agent Logic
-# ============================================================================
+def get_model_action(observation: dict) -> dict:
+    current_stage = observation["current_stage"]
+    allowed = ALLOWED_VALUES.get(current_stage)
 
-def build_user_prompt(
-    step: int,
-    current_email: dict,
-    last_reward: float,
-    history: List[str],
-) -> str:
-    """Build the user prompt for the model."""
-    email_str = f"Subject: {current_email.get('subject', 'N/A')}\nBody: {current_email.get('body', 'N/A')}"
+    prompt = f"""
+You are an email triage agent.
+Return ONLY one valid minified JSON object with keys: action_type, value.
 
-    history_str = "\n".join(history[-3:]) if history else "No history yet."
-
-    return f"""Step {step}: Process this email.
+Current stage: {current_stage}
+Available actions: {json.dumps(observation["available_actions"], ensure_ascii=False)}
 
 Email:
-{email_str}
+From: {observation["from_address"]}
+Subject: {observation["subject"]}
+Body: {observation["body"]}
+Customer tier: {observation["customer_tier"]}
+Hours waiting: {observation["hours_waiting"]}
+Thread history: {observation["thread_history"]}
 
-Last Reward: {last_reward:+.2f}
+Partial decision so far:
+{json.dumps(observation["partial_decision"], ensure_ascii=False)}
 
-Recent History:
-{history_str}
+Strict rules:
+1. Output exactly one JSON object. No markdown. No explanation.
+2. action_type must be exactly "{current_stage}".
+3. Do not invent labels.
+4. If allowed values are provided, value must be exactly one of them.
+5. For "submit", return {{"action_type":"submit","value":null}}.
+6. For "set_escalation", value must be true or false.
+7. For "draft_response", write a concise professional response.
+8. Choose the most operationally correct action, not the most polite wording.
 
-Decide your action (JSON):"""
+Decision guidance:
+- "critical" = security breach, suspicious login, unauthorized access, account compromise, payment breach, severe enterprise outage.
+- "high" = urgent issue, but not the most severe security/account-compromise level.
+- "medium" = normal support issue requiring action.
+- "low" = informational, low urgency, or non-blocking.
+- Use disposition "escalate" when the issue needs specialist, manager, or security handling.
+- Use disposition "mark_spam" only for junk/spam.
+- Use disposition "archive" only when no action is needed.
+- Use disposition "request_more_info" when key facts are missing.
+- Use disposition "respond" when regular support can answer directly.
+- Use disposition "resolve" only when the issue is already solved/closed.
+
+Important patterns:
+- Unknown device access, suspicious login, account takeover, credential theft, or security alerts usually imply:
+  priority = "critical"
+  route = "security_team"
+  disposition = "escalate"
+  escalation = true
+""".strip()
+
+    if allowed is not None:
+        prompt += "\n\nAllowed values for this stage:\n" + json.dumps(allowed, ensure_ascii=False)
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        temperature=0.0,
+        max_tokens=180,
+        messages=[
+            {"role": "system", "content": "You must return only valid JSON."},
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    text = response.choices[0].message.content.strip()
+    return json.loads(text)
 
 
-def get_model_message(
-    client: OpenAI,
-    step: int,
-    current_email: dict,
-    last_reward: float,
-    history: List[str],
-) -> dict:
-    """Get an action from the model."""
-    user_prompt = build_user_prompt(step, current_email, last_reward, history)
+def main():
+    env = EmailTriageEnv(csv_path=CSV_PATH, task_name=TASK_NAME, seed=42)
+    obs = env.reset().model_dump()
 
-    try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-            stream=False,
-        )
-        text = (completion.choices[0].message.content or "").strip()
+    log_start(TASK_NAME, BENCHMARK, MODEL_NAME)
 
-        # Try to parse as JSON
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            # Fallback: return a simple action
-            return {"action_type": "archive"}
-
-    except Exception as exc:
-        print(f"[DEBUG] Model request failed: {exc}", flush=True)
-        return {"action_type": "archive"}
-
-
-# ============================================================================
-# Main Loop
-# ============================================================================
-
-def run_task(task_name: str, task_obj) -> float:
-    """Run the environment with a specific task and return the score."""
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-    env = EmailEnv(task=task_obj)
-
-    history: List[str] = []
-    rewards: List[float] = []
-    steps_taken = 0
-    score = 0.0
+    rewards: list[float] = []
+    steps = 0
     success = False
 
-    log_start(task=task_name, env="email-openenv", model=MODEL_NAME)
-
     try:
-        obs = env.reset()
-        last_reward = 0.0
+        done = False
+        while not done:
+            model_action = get_model_action(obs)
+            action = EmailTriageAction(**model_action)
 
-        for step in range(1, MAX_STEPS + 1):
-            if obs.current_email is None:
-                break
+            next_obs, reward, done, info = env.step(action)
+            obs = next_obs.model_dump()
 
-            action = get_model_message(client, step, obs.current_email, last_reward, history)
+            steps += 1
+            rewards.append(reward.reward)
 
-            obs, reward, done, info = env.step(action)
-
-            rewards.append(reward)
-            steps_taken = step
-            last_reward = reward
-
-            error = info.get("last_action_error")
-            log_step(step=step, action=json.dumps(action), reward=reward, done=done, error=error)
-
-            history.append(f"Step {step}: {action.get('action_type', 'unknown')} -> {reward:+.2f}")
+            action_str = json.dumps(model_action, ensure_ascii=False, separators=(",", ":"))
+            log_step(
+                step=steps,
+                action=action_str,
+                reward=reward.reward,
+                done=done,
+                error=obs.get("last_action_error"),
+            )
 
             if done:
-                break
-
-        # Calculate final score
-        score = sum(rewards) / MAX_TOTAL_REWARD if MAX_TOTAL_REWARD > 0 else 0.0
-        score = min(max(score, 0.0), 1.0)  # clamp to [0, 1]
-        success = score >= SUCCESS_SCORE_THRESHOLD
+                print("FINAL GRADER SCORE:", info.grader_score)
+                print("EXPECTED:", info.expected)
+                print("PREDICTED:", info.predicted)
+                success = info.grader_score >= 0.70
 
     except Exception as e:
-        print(f"[DEBUG] Error during evaluation: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-
+        log_step(
+            step=steps + 1,
+            action='{"action_type":"error","value":null}',
+            reward=0.00,
+            done=True,
+            error=str(e),
+        )
     finally:
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
-
-    return score
-
-
-def main() -> None:
-    """Run baseline evaluation on all three tasks."""
-    print("[INFO] Starting Email OpenEnv Baseline Evaluation", file=sys.stderr, flush=True)
-    print(f"[INFO] Model: {MODEL_NAME}", file=sys.stderr, flush=True)
-    print(f"[INFO] API Base: {API_BASE_URL}", file=sys.stderr, flush=True)
-
-    if not API_KEY:
-        print("[ERROR] No API key found. Set OPENAI_API_KEY or HF_TOKEN.", file=sys.stderr, flush=True)
-        sys.exit(1)
-
-    tasks = [
-        ("easy", EasyTask()),
-        ("medium", MediumTask()),
-        ("hard", HardTask()),
-    ]
-
-    scores = {}
-    for task_name, task_obj in tasks:
-        print(f"\n[INFO] Running task: {task_name}", file=sys.stderr, flush=True)
-        score = run_task(task_name, task_obj)
-        scores[task_name] = score
-        print(f"[INFO] Task '{task_name}' score: {score:.3f}", file=sys.stderr, flush=True)
-
-    # Print summary
-    print(f"\n[INFO] Summary:", file=sys.stderr, flush=True)
-    for task_name, score in scores.items():
-        print(f"  {task_name}: {score:.3f}", file=sys.stderr, flush=True)
-
-    avg_score = sum(scores.values()) / len(scores)
-    print(f"  Average: {avg_score:.3f}", file=sys.stderr, flush=True)
+        env.close()
+        log_end(success=success, steps=steps, rewards=rewards)
 
 
 if __name__ == "__main__":
