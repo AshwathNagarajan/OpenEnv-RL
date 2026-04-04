@@ -20,6 +20,11 @@ EPISODES_PER_TASK = int(os.getenv("EPISODES_PER_TASK", "1"))
 FORCE_HEURISTIC = os.getenv("FORCE_HEURISTIC", "0").strip().lower() in {"1", "true", "yes"}
 USE_LLM = llm_available() and not FORCE_HEURISTIC
 
+print("[DEBUG] HF_TOKEN exists:", bool(os.getenv("HF_TOKEN")), flush=True)
+print("[DEBUG] API_BASE_URL:", os.getenv("API_BASE_URL"), flush=True)
+print("[DEBUG] MODEL_NAME:", os.getenv("MODEL_NAME"), flush=True)
+print("[DEBUG] FORCE_HEURISTIC:", os.getenv("FORCE_HEURISTIC"), flush=True)
+
 
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
