@@ -60,7 +60,7 @@ def run_inference(
     env["EPISODES_PER_TASK"] = str(episodes)
 
     # Keep the public demo stable even if external LLM credentials are present.
-    env.setdefault("FORCE_HEURISTIC", "1")
+    env.setdefault("FORCE_HEURISTIC", "0")
 
     try:
         proc = subprocess.run(
