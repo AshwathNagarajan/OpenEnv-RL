@@ -9,6 +9,7 @@ COPY app ./app
 COPY data ./data
 COPY openenv.yaml .
 COPY inference.py .
+COPY runner.py .
 COPY README.md .
 
 EXPOSE 7860

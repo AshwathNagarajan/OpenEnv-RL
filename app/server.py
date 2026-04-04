@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from app.env import EmailTriageEnv
 from app.models import EmailTriageAction
 
@@ -25,24 +25,34 @@ def root():
 
 
 @app.get("/run")
-def run_inference():
+def run_inference(
+    tasks: str = Query("easy,medium,hard", description="Comma-separated tasks"),
+    episodes: int = Query(2, ge=1, le=10, description="Episodes per task"),
+):
     env = os.environ.copy()
-    env.setdefault("EMAIL_TRIAGE_TASKS", "easy,medium,hard")
-    env.setdefault("EPISODES_PER_TASK", "2")
+    env["EMAIL_TRIAGE_TASKS"] = tasks
+    env["EPISODES_PER_TASK"] = str(episodes)
 
-    proc = subprocess.run(
-        [sys.executable, "runner.py"],
-        cwd=str(BASE_DIR),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-    return {
-        "returncode": proc.returncode,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-    }
+    try:
+        proc = subprocess.run(
+            [sys.executable, "runner.py"],
+            cwd=str(BASE_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        return {
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "returncode": -1,
+            "stdout": "",
+            "stderr": "runner.py timed out after 300 seconds",
+        }
 
 
 @app.post("/set_task/{task_name}")
