@@ -134,6 +134,19 @@ class EmailTriageEnv:
     def _advance_stage(self) -> None:
         self.current_stage_index += 1
 
+    def _draft_response_reward(self, text: str) -> float:
+        text = text.strip()
+        if len(text) < 12:
+            return -0.03
+
+        reward = 0.03
+        if any(token in text.lower() for token in ["hello", "hi", "thank you", "thanks"]):
+            reward += 0.01
+        if self.current_email and self.current_email.from_address.split("@")[0].lower() in text.lower():
+            reward += 0.01
+
+        return min(0.08, reward)
+
     def _dense_reward_for_correct_field(self, field_name: str, value: Any) -> float:
         e = self.current_email
         assert e is not None
@@ -145,7 +158,34 @@ class EmailTriageEnv:
             "set_disposition": e.true_disposition,
             "set_escalation": e.requires_escalation,
         }
-        return 0.15 if mapping.get(field_name) == value else -0.05
+
+        if mapping.get(field_name) == value:
+            return 0.15
+
+        if field_name == "set_route" and self.decision.category is not None:
+            valid_route_by_category = {
+                "technical": "tech_support",
+                "feature_request": "product_team",
+                "internal": "manager",
+                "spam": "ignore",
+                "shipping": "ops_team",
+                "security": "security_team",
+                "sales": "sales_team",
+                "billing": "billing_team",
+            }
+            if value == valid_route_by_category.get(self.decision.category):
+                return 0.05
+
+        if field_name == "set_escalation" and self.decision.priority == "critical" and value is True:
+            return 0.05
+
+        if field_name == "set_disposition":
+            if self.decision.category == "spam" and value == "mark_spam":
+                return 0.05
+            if self.decision.category == "security" and value == "escalate":
+                return 0.05
+
+        return -0.05
 
     def _apply_action(self, action: EmailTriageAction) -> float:
         expected_stage = self._current_stage()
@@ -185,7 +225,7 @@ class EmailTriageEnv:
         elif action.action_type == "draft_response":
             text = str(action.value or "").strip()
             self.decision.drafted_response = text
-            reward += 0.05 if len(text) >= 12 else -0.03
+            reward += self._draft_response_reward(text)
 
         elif action.action_type == "submit":
             if self.task_name == "easy":
